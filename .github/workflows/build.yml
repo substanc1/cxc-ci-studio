@@ -1,0 +1,59 @@
+# Сборка CubeX Builder Studio. Исходники лежат в payload.bin, зашифрованном ключом SRC_KEY.
+# Результат каждой системы шифруется тем же ключом в result.bin: открытых сборок в артефактах нет.
+name: build
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: windows-latest, target: windows }
+          - { os: macos-latest, target: macos }
+          - { os: ubuntu-22.04, target: linux }
+          - { os: ubuntu-22.04-arm, target: linux-arm }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: build
+        shell: bash
+        env:
+          SRC_KEY: ${{ secrets.SRC_KEY }}
+          SIGN_KEY: ${{ secrets.SIGN_KEY }}
+          SIGN_PASS: ${{ secrets.SIGN_PASS }}
+        run: |
+          set -o pipefail
+          OSSL=openssl
+          [ "$RUNNER_OS" = macOS ] && OSSL="$(brew --prefix openssl@3)/bin/openssl"
+          K="$(printf %s "$SRC_KEY" | tr -d '\r\n')"
+          unset SRC_KEY
+          mkdir -p w out
+          env K="$K" "$OSSL" enc -d -aes-256-cbc -pbkdf2 -iter 200000 -pass env:K -in payload.bin | tar xz -C w
+          export COPYFILE_DISABLE=1
+          rc=0
+          bash w/app/ci/build.sh "${{ matrix.target }}" "$PWD/out" > out/build.log 2>&1 || rc=$?
+          if [ "$rc" = 0 ] && ! ls out/*.sig >/dev/null 2>&1; then echo "нет .sig: подпись обновлений не создана"; rc=3; fi
+          if [ "$RUNNER_OS" = macOS ]; then find out -name '._*' -delete; fi
+          tar cz -C out . | env K="$K" "$OSSL" enc -e -aes-256-cbc -pbkdf2 -iter 200000 -salt -pass env:K -out result.bin
+          rm -rf w out
+          unset K
+          echo "rc=$rc"
+          exit $rc
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: result-${{ matrix.target }}
+          path: result.bin
+          if-no-files-found: ignore
+          retention-days: 1
